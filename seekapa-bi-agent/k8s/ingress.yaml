@@ -1,0 +1,197 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: seekapa-ingress
+  namespace: seekapa
+  labels:
+    app: seekapa
+  annotations:
+    # Nginx Ingress Controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+
+    # CORS
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Authorization"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+
+    # Client body size for file uploads
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+
+    # Load balancing
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$binary_remote_addr"
+    nginx.ingress.kubernetes.io/session-cookie-name: "seekapa-session"
+    nginx.ingress.kubernetes.io/session-cookie-expires: "86400"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    nginx.ingress.kubernetes.io/session-cookie-path: "/"
+
+    # SSL/TLS
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
+    nginx.ingress.kubernetes.io/ssl-ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384"
+
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - seekapa.ai
+    - api.seekapa.ai
+    secretName: seekapa-tls
+  rules:
+  - host: seekapa.ai
+    http:
+      paths:
+      # Frontend routes
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-frontend-service
+            port:
+              number: 80
+      # API routes
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+      # Health check endpoint
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+      # Metrics endpoint (protected)
+      - path: /metrics
+        pathType: Exact
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+  - host: api.seekapa.ai
+    http:
+      paths:
+      # Dedicated API subdomain
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+
+---
+# Additional ingress for development/staging
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: seekapa-ingress-dev
+  namespace: seekapa
+  labels:
+    app: seekapa
+    env: development
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/rate-limit: "200"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - dev.seekapa.ai
+    - dev-api.seekapa.ai
+    secretName: seekapa-dev-tls
+  rules:
+  - host: dev.seekapa.ai
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-frontend-service
+            port:
+              number: 80
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+  - host: dev-api.seekapa.ai
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: seekapa-backend-service
+            port:
+              number: 8000
+
+---
+# Ingress for monitoring services (restricted access)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: seekapa-monitoring-ingress
+  namespace: seekapa
+  labels:
+    app: seekapa-monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: monitoring-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Authentication Required - Monitoring"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # IP whitelist for additional security
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - monitoring.seekapa.ai
+    secretName: seekapa-monitoring-tls
+  rules:
+  - host: monitoring.seekapa.ai
+    http:
+      paths:
+      # Grafana
+      - path: /grafana
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana-service
+            port:
+              number: 3000
+      # Prometheus
+      - path: /prometheus
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus-service
+            port:
+              number: 9090
