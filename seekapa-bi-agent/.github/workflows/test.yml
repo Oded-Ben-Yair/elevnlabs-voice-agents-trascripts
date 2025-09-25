@@ -1,0 +1,585 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [ main, develop, feature/* ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Frontend Unit Tests
+  frontend-unit-tests:
+    name: Frontend Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run frontend linting
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Run frontend type checking
+        working-directory: ./frontend
+        run: npm run type-check
+
+      - name: Run frontend unit tests
+        working-directory: ./frontend
+        run: npm run test:unit -- --coverage
+
+      - name: Upload frontend coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/lcov.info
+          flags: frontend-unit
+          name: Frontend Unit Tests
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Archive frontend test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-unit-test-results
+          path: |
+            ./test-results/unit-test-results.json
+            ./test-results/unit-test-results.html
+          retention-days: 30
+
+  # Backend Unit Tests
+  backend-unit-tests:
+    name: Backend Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: seekapa_bi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov pytest-mock
+
+      - name: Run backend linting
+        working-directory: ./backend
+        run: |
+          flake8 app/ tests/
+          black --check app/ tests/
+          isort --check-only app/ tests/
+
+      - name: Run backend type checking
+        working-directory: ./backend
+        run: mypy app/
+
+      - name: Run backend unit tests
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/seekapa_bi_test
+          REDIS_URL: redis://localhost:6379/1
+          TESTING: 1
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            --junitxml=test-results/pytest-results.xml \
+            -v
+
+      - name: Upload backend coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./backend/coverage.xml
+          flags: backend-unit
+          name: Backend Unit Tests
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Archive backend test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-unit-test-results
+          path: |
+            ./backend/test-results/
+            ./backend/htmlcov/
+          retention-days: 30
+
+  # Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [frontend-unit-tests, backend-unit-tests]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: seekapa_bi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          # Frontend dependencies
+          cd frontend && npm ci && cd ..
+
+          # Backend dependencies
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+          cd ..
+
+      - name: Start backend server
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/seekapa_bi_test
+          REDIS_URL: redis://localhost:6379/1
+        run: |
+          python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+        background: true
+
+      - name: Wait for backend to be ready
+        run: |
+          timeout 30 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+
+      - name: Run integration tests
+        env:
+          API_BASE_URL: http://localhost:8000
+        run: npm run test:integration
+
+      - name: Archive integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: |
+            ./test-results/integration-*.json
+            ./test-results/integration-*.html
+          retention-days: 30
+
+  # E2E Tests with Playwright
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [integration-tests]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: seekapa_bi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          # Frontend dependencies
+          cd frontend && npm ci && cd ..
+
+          # Backend dependencies
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          cd ..
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Start backend server
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/seekapa_bi_test
+          REDIS_URL: redis://localhost:6379/1
+        run: |
+          python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+
+      - name: Start frontend server
+        working-directory: ./frontend
+        run: |
+          npm run preview -- --port 3000 --host 0.0.0.0 &
+          sleep 5
+
+      - name: Wait for services to be ready
+        run: |
+          timeout 30 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+          timeout 30 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+
+      - name: Run E2E tests
+        env:
+          BASE_URL: http://localhost:3000
+          API_URL: http://localhost:8000
+        run: npx playwright test
+
+      - name: Upload E2E test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-test-results
+          path: |
+            ./test-results/
+            ./playwright-report/
+          retention-days: 30
+
+  # Performance Tests
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: seekapa_bi_test
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install K6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+          sudo mv k6 /usr/local/bin/
+
+      - name: Start backend server
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/seekapa_bi_test
+          REDIS_URL: redis://localhost:6379/1
+        run: |
+          python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          sleep 10
+
+      - name: Wait for backend to be ready
+        run: |
+          timeout 30 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+
+      - name: Run performance tests
+        env:
+          BASE_URL: http://localhost:8000
+        run: |
+          k6 run --out json=performance-results.json tests/performance/load-test.js
+          k6 run --out json=websocket-results.json tests/performance/websocket-test.js
+
+      - name: Archive performance test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-test-results
+          path: |
+            ./performance-results.json
+            ./websocket-results.json
+          retention-days: 30
+
+  # Security and Quality Checks
+  security-checks:
+    name: Security & Quality Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          cd frontend && npm ci && cd ..
+          cd backend && pip install -r requirements.txt && cd ..
+
+      - name: Run frontend security audit
+        working-directory: ./frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Run Python security check
+        working-directory: ./backend
+        run: |
+          pip install safety bandit
+          safety check
+          bandit -r app/ -f json -o bandit-results.json || true
+
+      - name: Run dependency vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload security scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Archive security check results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-check-results
+          path: |
+            ./backend/bandit-results.json
+            ./trivy-results.sarif
+          retention-days: 30
+
+  # Test Summary and Reporting
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [frontend-unit-tests, backend-unit-tests, integration-tests, e2e-tests, security-checks]
+    if: always()
+
+    steps:
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate test summary report
+        run: |
+          echo "# Test Suite Summary" > test-summary.md
+          echo "" >> test-summary.md
+          echo "## Test Results Overview" >> test-summary.md
+          echo "" >> test-summary.md
+
+          # Check job results
+          if [ "${{ needs.frontend-unit-tests.result }}" == "success" ]; then
+            echo "✅ Frontend Unit Tests: PASSED" >> test-summary.md
+          else
+            echo "❌ Frontend Unit Tests: FAILED" >> test-summary.md
+          fi
+
+          if [ "${{ needs.backend-unit-tests.result }}" == "success" ]; then
+            echo "✅ Backend Unit Tests: PASSED" >> test-summary.md
+          else
+            echo "❌ Backend Unit Tests: FAILED" >> test-summary.md
+          fi
+
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "✅ Integration Tests: PASSED" >> test-summary.md
+          else
+            echo "❌ Integration Tests: FAILED" >> test-summary.md
+          fi
+
+          if [ "${{ needs.e2e-tests.result }}" == "success" ]; then
+            echo "✅ E2E Tests: PASSED" >> test-summary.md
+          else
+            echo "❌ E2E Tests: FAILED" >> test-summary.md
+          fi
+
+          if [ "${{ needs.security-checks.result }}" == "success" ]; then
+            echo "✅ Security Checks: PASSED" >> test-summary.md
+          else
+            echo "❌ Security Checks: FAILED" >> test-summary.md
+          fi
+
+          echo "" >> test-summary.md
+          echo "## Coverage Reports" >> test-summary.md
+          echo "Coverage reports have been uploaded to Codecov." >> test-summary.md
+          echo "" >> test-summary.md
+          echo "## Artifacts" >> test-summary.md
+          echo "All test results and reports have been archived as workflow artifacts." >> test-summary.md
+
+      - name: Comment PR with test results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('test-summary.md', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Upload test summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary
+          path: test-summary.md
+          retention-days: 30
+
+  # Notification on failure
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [frontend-unit-tests, backend-unit-tests, integration-tests, e2e-tests]
+    if: failure() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Send notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#ci-cd'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

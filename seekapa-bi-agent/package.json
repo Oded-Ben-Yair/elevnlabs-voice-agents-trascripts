@@ -1,0 +1,72 @@
+{
+  "name": "seekapa-bi-agent",
+  "version": "1.0.0",
+  "description": "Comprehensive BI Agent with AI-powered insights and PowerBI integration",
+  "scripts": {
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "test:unit": "vitest run --reporter=verbose",
+    "test:unit:watch": "vitest",
+    "test:unit:coverage": "vitest run --coverage",
+    "test:integration": "vitest run tests/integration --reporter=verbose",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug",
+    "test:performance": "k6 run tests/performance/load-test.js",
+    "test:performance:websocket": "k6 run tests/performance/websocket-test.js",
+    "test:backend": "cd backend && python -m pytest tests/ -v --cov=app",
+    "test:all": "npm run test:backend && npm run test",
+    "lint": "npm run lint:frontend && npm run lint:backend",
+    "lint:frontend": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "lint:backend": "cd backend && flake8 app/ tests/ && black --check app/ tests/",
+    "lint:fix": "npm run lint:frontend -- --fix && cd backend && black app/ tests/ && isort app/ tests/",
+    "type-check": "tsc --noEmit",
+    "build": "cd frontend && npm run build",
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --reload",
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && pip install -r requirements.txt",
+    "clean": "rm -rf node_modules frontend/node_modules backend/venv test-results coverage .nyc_output playwright-report",
+    "setup": "npm run install:all && npx playwright install"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^8.3.1",
+    "@playwright/test": "^1.40.0",
+    "@testing-library/jest-dom": "^6.1.5",
+    "@testing-library/react": "^14.1.2",
+    "@testing-library/user-event": "^14.5.1",
+    "@types/node": "^20.9.0",
+    "@typescript-eslint/eslint-plugin": "^6.12.0",
+    "@typescript-eslint/parser": "^6.12.0",
+    "@vitejs/plugin-react": "^4.1.1",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.54.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "jsdom": "^23.0.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.0",
+    "vitest": "^1.0.0",
+    "@vitest/coverage-v8": "^1.0.0"
+  },
+  "keywords": [
+    "bi",
+    "business-intelligence",
+    "powerbi",
+    "ai",
+    "analytics",
+    "dashboard",
+    "testing",
+    "playwright",
+    "vitest",
+    "k6"
+  ],
+  "author": "Seekapa BI Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "workspaces": [
+    "frontend"
+  ]
+}

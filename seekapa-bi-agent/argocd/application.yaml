@@ -1,0 +1,193 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: seekapa-bi-agent
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/seekapa/seekapa-bi-agent
+    targetRevision: HEAD
+    path: k8s/overlays/production
+
+    # Kustomize configuration
+    kustomize:
+      namePrefix: seekapa-
+      commonLabels:
+        app.kubernetes.io/name: seekapa-bi-agent
+        app.kubernetes.io/managed-by: argocd
+      images:
+        - name: backend
+          newTag: latest
+        - name: frontend
+          newTag: latest
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: seekapa-production
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 10
+
+  # Health checks
+  health:
+    progressDeadlineSeconds: 600
+
+  # Ignore differences for specific fields
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+      jsonPointers:
+        - /spec/minReplicas
+        - /spec/maxReplicas
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: seekapa-bi-agent-staging
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/seekapa/seekapa-bi-agent
+    targetRevision: develop
+    path: k8s/overlays/staging
+
+    kustomize:
+      namePrefix: seekapa-
+      commonLabels:
+        app.kubernetes.io/name: seekapa-bi-agent
+        app.kubernetes.io/instance: staging
+        app.kubernetes.io/managed-by: argocd
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: seekapa-staging
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: seekapa-bi-agent-feature-branches
+  namespace: argocd
+spec:
+  generators:
+    - scmProvider:
+        github:
+          organization: seekapa
+          cloneProtocol: https
+        filters:
+          - branchMatch: ^feature/.*$
+
+  template:
+    metadata:
+      name: '{{repository}}-{{branch}}'
+      namespace: argocd
+    spec:
+      project: default
+
+      source:
+        repoURL: '{{url}}'
+        targetRevision: '{{branch}}'
+        path: k8s/overlays/development
+
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'seekapa-{{branch}}'
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: false
+        syncOptions:
+          - CreateNamespace=true
+
+      # Clean up after 7 days of inactivity
+      info:
+        - name: 'ttl'
+          value: '7d'
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: seekapa-bi-agent-project
+  namespace: argocd
+spec:
+  description: Seekapa BI Agent Project
+
+  sourceRepos:
+    - https://github.com/seekapa/seekapa-bi-agent
+    - https://charts.helm.sh/stable
+    - https://charts.bitnami.com/bitnami
+
+  destinations:
+    - namespace: seekapa-*
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+    - namespace: logging
+      server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  roles:
+    - name: admin
+      policies:
+        - p, proj:seekapa-bi-agent-project:admin, *, *, seekapa-bi-agent-project/*, allow
+      groups:
+        - seekapa:admins
+
+    - name: developer
+      policies:
+        - p, proj:seekapa-bi-agent-project:developer, *, get, seekapa-bi-agent-project/*, allow
+        - p, proj:seekapa-bi-agent-project:developer, *, sync, seekapa-bi-agent-project/*, allow
+      groups:
+        - seekapa:developers

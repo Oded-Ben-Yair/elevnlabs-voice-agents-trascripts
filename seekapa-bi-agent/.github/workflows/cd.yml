@@ -1,0 +1,282 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+        - development
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE_NAME: ${{ github.repository }}-backend
+  FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
+  AZURE_WEBAPP_NAME: seekapa-bi-agent
+  AZURE_RESOURCE_GROUP: seekapa-rg
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      backend-image: ${{ steps.backend-image.outputs.image }}
+      frontend-image: ${{ steps.frontend-image.outputs.image }}
+      version: ${{ steps.version.outputs.version }}
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION=sha-${GITHUB_SHA::8}
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Backend Docker image
+      id: backend-build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        file: ./backend/Dockerfile
+        push: true
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:latest
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:buildcache,mode=max
+        labels: |
+          org.opencontainers.image.source=${{ github.event.repository.html_url }}
+          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+          org.opencontainers.image.revision=${{ github.sha }}
+
+    - name: Build and push Frontend Docker image
+      id: frontend-build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        file: ./frontend/Dockerfile
+        push: true
+        build-args: |
+          REACT_APP_API_URL=${{ secrets.API_URL }}
+          REACT_APP_VERSION=${{ steps.version.outputs.version }}
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:latest
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:buildcache,mode=max
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        artifact-name: backend-sbom
+        format: spdx-json
+
+    - name: Set output images
+      id: backend-image
+      run: echo "image=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
+
+    - name: Set output frontend image
+      id: frontend-image
+      run: echo "image=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
+
+  deploy-staging:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Deploy to Azure Kubernetes Service
+      run: |
+        az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name seekapa-aks-staging
+
+        # Update deployments with new images
+        kubectl set image deployment/backend-deployment \
+          backend=${{ needs.build-and-push.outputs.backend-image }} \
+          -n seekapa-staging
+
+        kubectl set image deployment/frontend-deployment \
+          frontend=${{ needs.build-and-push.outputs.frontend-image }} \
+          -n seekapa-staging
+
+        # Wait for rollout to complete
+        kubectl rollout status deployment/backend-deployment -n seekapa-staging
+        kubectl rollout status deployment/frontend-deployment -n seekapa-staging
+
+    - name: Run smoke tests
+      run: |
+        npm install -g newman
+        newman run tests/postman/smoke-tests.json \
+          --environment tests/postman/staging.environment.json \
+          --reporters cli,json \
+          --reporter-json-export newman-results.json
+
+    - name: Notify deployment status
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: 'Staging deployment ${{ job.status }} for version ${{ needs.build-and-push.outputs.version }}'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+
+  deploy-production:
+    needs: [build-and-push, deploy-staging]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create release notes
+      id: release
+      uses: release-drafter/release-drafter@v5
+      with:
+        version: ${{ needs.build-and-push.outputs.version }}
+        publish: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Blue-Green Deployment to Production
+      run: |
+        az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name seekapa-aks-prod
+
+        # Create new green deployment
+        kubectl apply -f k8s/production/green-deployment.yaml
+        kubectl set image deployment/backend-deployment-green \
+          backend=${{ needs.build-and-push.outputs.backend-image }} \
+          -n seekapa-prod
+        kubectl set image deployment/frontend-deployment-green \
+          frontend=${{ needs.build-and-push.outputs.frontend-image }} \
+          -n seekapa-prod
+
+        # Wait for green deployment to be ready
+        kubectl rollout status deployment/backend-deployment-green -n seekapa-prod
+        kubectl rollout status deployment/frontend-deployment-green -n seekapa-prod
+
+        # Run health checks on green deployment
+        ./scripts/health-check.sh green
+
+        # Switch traffic to green deployment
+        kubectl patch service backend-service -n seekapa-prod -p '{"spec":{"selector":{"version":"green"}}}'
+        kubectl patch service frontend-service -n seekapa-prod -p '{"spec":{"selector":{"version":"green"}}}'
+
+        # Keep blue deployment for rollback
+        kubectl label deployment backend-deployment-blue version=blue-backup -n seekapa-prod --overwrite
+        kubectl label deployment frontend-deployment-blue version=blue-backup -n seekapa-prod --overwrite
+
+    - name: Update Azure Application Insights
+      run: |
+        az monitor app-insights component update \
+          --app seekapa-bi-insights \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --retention-time 90
+
+    - name: Create PagerDuty maintenance window
+      run: |
+        curl -X POST https://api.pagerduty.com/maintenance_windows \
+          -H 'Authorization: Token token=${{ secrets.PAGERDUTY_TOKEN }}' \
+          -H 'Content-Type: application/json' \
+          -d '{
+            "maintenance_window": {
+              "type": "maintenance_window",
+              "start_time": "'$(date -u +%Y-%m-%dT%H:%M:%S)'",
+              "end_time": "'$(date -u -d "+30 minutes" +%Y-%m-%dT%H:%M:%S)'",
+              "description": "Production deployment v${{ needs.build-and-push.outputs.version }}",
+              "services": [{"id": "${{ secrets.PAGERDUTY_SERVICE_ID }}", "type": "service_reference"}]
+            }
+          }'
+
+    - name: Notify production deployment
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: 'Production deployment ${{ job.status }} for version ${{ needs.build-and-push.outputs.version }}'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+
+  rollback:
+    needs: [deploy-production]
+    runs-on: ubuntu-latest
+    if: failure()
+    environment: production
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Rollback to blue deployment
+      run: |
+        az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name seekapa-aks-prod
+
+        # Switch traffic back to blue deployment
+        kubectl patch service backend-service -n seekapa-prod -p '{"spec":{"selector":{"version":"blue"}}}'
+        kubectl patch service frontend-service -n seekapa-prod -p '{"spec":{"selector":{"version":"blue"}}}'
+
+        # Delete failed green deployment
+        kubectl delete deployment backend-deployment-green -n seekapa-prod
+        kubectl delete deployment frontend-deployment-green -n seekapa-prod
+
+    - name: Create incident in PagerDuty
+      run: |
+        curl -X POST https://api.pagerduty.com/incidents \
+          -H 'Authorization: Token token=${{ secrets.PAGERDUTY_TOKEN }}' \
+          -H 'Content-Type: application/json' \
+          -d '{
+            "incident": {
+              "type": "incident",
+              "title": "Production deployment failed - Automatic rollback triggered",
+              "service": {"id": "${{ secrets.PAGERDUTY_SERVICE_ID }}", "type": "service_reference"},
+              "urgency": "high",
+              "body": {
+                "type": "incident_body",
+                "details": "Deployment of version ${{ needs.build-and-push.outputs.version }} failed. Automatic rollback to previous version executed."
+              }
+            }
+          }'

@@ -1,0 +1,942 @@
+openapi: 3.0.3
+info:
+  title: Seekapa BI Agent API
+  description: |
+    ## Overview
+    The Seekapa BI Agent API provides comprehensive business intelligence and analytics capabilities.
+
+    ## Authentication
+    All API requests require authentication using either:
+    - **API Key**: Include `X-API-Key` header
+    - **Bearer Token**: Include `Authorization: Bearer <token>` header
+
+    ## Rate Limiting
+    - Free tier: 100 requests/minute
+    - Pro tier: 1000 requests/minute
+    - Enterprise: Custom limits
+
+    ## Versioning
+    API versioning is handled through the URL path (e.g., `/api/v1/`)
+
+    ## Error Handling
+    All errors follow RFC 7807 (Problem Details for HTTP APIs) format
+  version: 1.0.0
+  termsOfService: https://seekapa.com/terms
+  contact:
+    name: API Support
+    email: api@seekapa.com
+    url: https://seekapa.com/support
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: https://api.seekapa.com/v1
+    description: Production server
+  - url: https://api-staging.seekapa.com/v1
+    description: Staging server
+  - url: http://localhost:8000/v1
+    description: Development server
+
+tags:
+  - name: Authentication
+    description: Authentication and authorization endpoints
+  - name: Analytics
+    description: Business intelligence and analytics operations
+  - name: Datasets
+    description: Dataset management operations
+  - name: Queries
+    description: Query execution and management
+  - name: Reports
+    description: Report generation and management
+  - name: Dashboards
+    description: Dashboard operations
+  - name: Users
+    description: User management
+  - name: Admin
+    description: Administrative operations
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: User login
+      description: Authenticate user and receive access tokens
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Successful authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      description: Exchange refresh token for new access token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /analytics/query:
+    post:
+      tags:
+        - Analytics
+      summary: Execute analytics query
+      description: Execute a business intelligence query on specified dataset
+      operationId: executeQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: Query executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /analytics/insights:
+    get:
+      tags:
+        - Analytics
+      summary: Get AI-powered insights
+      description: Retrieve AI-generated insights from your data
+      operationId: getInsights
+      parameters:
+        - name: dataset_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: timeframe
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month, quarter, year]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Insights retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsightsResponse'
+
+  /datasets:
+    get:
+      tags:
+        - Datasets
+      summary: List datasets
+      description: Retrieve list of available datasets
+      operationId: listDatasets
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Datasets retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatasetListResponse'
+
+    post:
+      tags:
+        - Datasets
+      summary: Create dataset
+      description: Create a new dataset
+      operationId: createDataset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDatasetRequest'
+      responses:
+        '201':
+          description: Dataset created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dataset'
+
+  /datasets/{datasetId}:
+    get:
+      tags:
+        - Datasets
+      summary: Get dataset details
+      description: Retrieve detailed information about a specific dataset
+      operationId: getDataset
+      parameters:
+        - $ref: '#/components/parameters/DatasetIdParam'
+      responses:
+        '200':
+          description: Dataset retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dataset'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+    put:
+      tags:
+        - Datasets
+      summary: Update dataset
+      description: Update dataset configuration
+      operationId: updateDataset
+      parameters:
+        - $ref: '#/components/parameters/DatasetIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDatasetRequest'
+      responses:
+        '200':
+          description: Dataset updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dataset'
+
+    delete:
+      tags:
+        - Datasets
+      summary: Delete dataset
+      description: Delete a dataset and all associated data
+      operationId: deleteDataset
+      parameters:
+        - $ref: '#/components/parameters/DatasetIdParam'
+      responses:
+        '204':
+          description: Dataset deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /reports:
+    get:
+      tags:
+        - Reports
+      summary: List reports
+      description: Retrieve list of generated reports
+      operationId: listReports
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Reports retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportListResponse'
+
+    post:
+      tags:
+        - Reports
+      summary: Generate report
+      description: Generate a new report based on specified parameters
+      operationId: generateReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateReportRequest'
+      responses:
+        '202':
+          description: Report generation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportGenerationResponse'
+
+  /dashboards:
+    get:
+      tags:
+        - Dashboards
+      summary: List dashboards
+      description: Retrieve list of user dashboards
+      operationId: listDashboards
+      responses:
+        '200':
+          description: Dashboards retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardListResponse'
+
+    post:
+      tags:
+        - Dashboards
+      summary: Create dashboard
+      description: Create a new dashboard
+      operationId: createDashboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDashboardRequest'
+      responses:
+        '201':
+          description: Dashboard created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dashboard'
+
+  /users/profile:
+    get:
+      tags:
+        - Users
+      summary: Get user profile
+      description: Retrieve current user's profile information
+      operationId: getUserProfile
+      responses:
+        '200':
+          description: Profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+
+    patch:
+      tags:
+        - Users
+      summary: Update user profile
+      description: Update current user's profile information
+      operationId: updateUserProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+
+  /admin/health:
+    get:
+      tags:
+        - Admin
+      summary: Health check
+      description: Check API health status
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+
+  /admin/metrics:
+    get:
+      tags:
+        - Admin
+      summary: Get metrics
+      description: Retrieve Prometheus metrics
+      operationId: getMetrics
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Metrics retrieved successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT bearer token authentication
+
+  parameters:
+    DatasetIdParam:
+      name: datasetId
+      in: path
+      required: true
+      description: Unique identifier of the dataset
+      schema:
+        type: string
+        format: uuid
+
+    PageParam:
+      name: page
+      in: query
+      description: Page number for pagination
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    LimitParam:
+      name: limit
+      in: query
+      description: Number of items per page
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    SortParam:
+      name: sort
+      in: query
+      description: Sort order (field:direction)
+      schema:
+        type: string
+        example: created_at:desc
+
+  schemas:
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          default: Bearer
+        expires_in:
+          type: integer
+          description: Token expiration time in seconds
+        user:
+          $ref: '#/components/schemas/UserProfile'
+
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refresh_token
+      properties:
+        refresh_token:
+          type: string
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          default: Bearer
+        expires_in:
+          type: integer
+
+    QueryRequest:
+      type: object
+      required:
+        - dataset_id
+        - query
+      properties:
+        dataset_id:
+          type: string
+          format: uuid
+        query:
+          type: string
+          description: SQL or natural language query
+        parameters:
+          type: object
+          additionalProperties: true
+        output_format:
+          type: string
+          enum: [json, csv, excel]
+          default: json
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1000
+
+    QueryResponse:
+      type: object
+      properties:
+        query_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [success, error]
+        execution_time_ms:
+          type: integer
+        row_count:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+        metadata:
+          type: object
+          properties:
+            columns:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  type:
+                    type: string
+
+    InsightsResponse:
+      type: object
+      properties:
+        insights:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              type:
+                type: string
+                enum: [trend, anomaly, correlation, forecast]
+              title:
+                type: string
+              description:
+                type: string
+              confidence:
+                type: number
+                minimum: 0
+                maximum: 1
+              data:
+                type: object
+              created_at:
+                type: string
+                format: date-time
+
+    Dataset:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [sql, nosql, api, file]
+        connection_details:
+          type: object
+        schema:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateDatasetRequest:
+      type: object
+      required:
+        - name
+        - type
+        - connection_details
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [sql, nosql, api, file]
+        connection_details:
+          type: object
+
+    UpdateDatasetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        connection_details:
+          type: object
+
+    DatasetListResponse:
+      type: object
+      properties:
+        datasets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dataset'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Dashboard:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        widgets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Widget'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateDashboardRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        widgets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Widget'
+
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [chart, table, metric, map]
+        title:
+          type: string
+        query_id:
+          type: string
+          format: uuid
+        configuration:
+          type: object
+
+    DashboardListResponse:
+      type: object
+      properties:
+        dashboards:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dashboard'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    GenerateReportRequest:
+      type: object
+      required:
+        - name
+        - type
+        - dataset_id
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [pdf, excel, powerpoint]
+        dataset_id:
+          type: string
+          format: uuid
+        queries:
+          type: array
+          items:
+            type: string
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+
+    ReportGenerationResponse:
+      type: object
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+        estimated_completion:
+          type: string
+          format: date-time
+
+    ReportListResponse:
+      type: object
+      properties:
+        reports:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              type:
+                type: string
+              status:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+              download_url:
+                type: string
+                format: uri
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        plan:
+          type: string
+          enum: [free, pro, enterprise]
+        usage:
+          type: object
+          properties:
+            api_calls:
+              type: integer
+            storage_mb:
+              type: integer
+            queries_executed:
+              type: integer
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        timezone:
+          type: string
+        notifications:
+          type: object
+
+    Schedule:
+      type: object
+      properties:
+        frequency:
+          type: string
+          enum: [daily, weekly, monthly]
+        time:
+          type: string
+          format: time
+        timezone:
+          type: string
+
+    HealthCheckResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        checks:
+          type: object
+          properties:
+            database:
+              type: string
+            cache:
+              type: string
+            external_apis:
+              type: string
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total_items:
+          type: integer
+        total_pages:
+          type: integer
+
+    Error:
+      type: object
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+
+  responses:
+    BadRequestError:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://seekapa.com/errors/bad-request
+            title: Bad Request
+            status: 400
+            detail: The request body is invalid
+
+    UnauthorizedError:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://seekapa.com/errors/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: Invalid or missing authentication credentials
+
+    ForbiddenError:
+      description: Access forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://seekapa.com/errors/forbidden
+            title: Forbidden
+            status: 403
+            detail: You do not have permission to access this resource
+
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://seekapa.com/errors/not-found
+            title: Not Found
+            status: 404
+            detail: The requested resource was not found
+
+    RateLimitError:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://seekapa.com/errors/rate-limit
+            title: Too Many Requests
+            status: 429
+            detail: Rate limit exceeded. Please try again later
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer

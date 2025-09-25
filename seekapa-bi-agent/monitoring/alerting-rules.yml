@@ -1,0 +1,284 @@
+groups:
+  - name: application_alerts
+    interval: 30s
+    rules:
+      # API Performance Alerts
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile latency is {{ $value }}s (threshold: 0.5s) for {{ $labels.instance }}"
+          runbook_url: "https://seekapa.com/runbooks/high-api-latency"
+
+      - alert: VeryHighAPILatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+          pagerduty: true
+        annotations:
+          summary: "Very high API latency detected"
+          description: "95th percentile latency is {{ $value }}s (threshold: 1s) for {{ $labels.instance }}"
+
+      # Error Rate Alerts
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      - alert: CriticalErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+          pagerduty: true
+        annotations:
+          summary: "Critical error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      # Traffic Alerts
+      - alert: UnusualTrafficSpike
+        expr: rate(http_requests_total[5m]) > 2 * avg_over_time(rate(http_requests_total[5m])[1h:5m])
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Unusual traffic spike detected"
+          description: "Current traffic is {{ $value }} req/s, which is 2x the hourly average"
+
+      - alert: NoTraffic
+        expr: rate(http_requests_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          team: backend
+          pagerduty: true
+        annotations:
+          summary: "No traffic detected"
+          description: "No requests received in the last 10 minutes for {{ $labels.instance }}"
+
+  - name: database_alerts
+    interval: 30s
+    rules:
+      - alert: HighDatabaseConnections
+        expr: pg_stat_database_numbackends / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: database
+        annotations:
+          summary: "High database connection usage"
+          description: "Database connection usage is {{ $value | humanizePercentage }} of max"
+
+      - alert: DatabaseDown
+        expr: up{job="postgresql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: database
+          pagerduty: true
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "PostgreSQL instance {{ $labels.instance }} is not responding"
+
+      - alert: HighDatabaseLockWaits
+        expr: rate(pg_stat_database_conflicts[5m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: database
+        annotations:
+          summary: "High database lock waits"
+          description: "Lock wait rate is {{ $value }} per second"
+
+      - alert: SlowQueries
+        expr: pg_slow_queries_total > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: database
+        annotations:
+          summary: "Too many slow queries"
+          description: "{{ $value }} slow queries detected in the last 5 minutes"
+
+  - name: cache_alerts
+    interval: 30s
+    rules:
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: backend
+          pagerduty: true
+        annotations:
+          summary: "Redis cache is down"
+          description: "Redis instance {{ $labels.instance }} is not responding"
+
+      - alert: HighRedisMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High Redis memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }} of max"
+
+      - alert: HighCacheMissRate
+        expr: rate(redis_keyspace_misses_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High cache miss rate"
+          description: "Cache miss rate is {{ $value | humanizePercentage }}"
+
+  - name: infrastructure_alerts
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: (1 - avg by(instance)(irate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      - alert: DiskSpaceRunningOut
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs|squashfs|vfat"} / node_filesystem_size_bytes < 0.1)
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "Disk space running out"
+          description: "Less than 10% disk space remaining on {{ $labels.mountpoint }} for {{ $labels.instance }}"
+
+      - alert: ContainerRestarting
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Container restarting frequently"
+          description: "Container {{ $labels.container }} in pod {{ $labels.pod }} has restarted {{ $value }} times in the last 15 minutes"
+
+  - name: business_metrics_alerts
+    interval: 60s
+    rules:
+      - alert: LowUserRegistrationRate
+        expr: rate(user_registrations_total[1h]) < 10
+        for: 2h
+        labels:
+          severity: info
+          team: product
+        annotations:
+          summary: "Low user registration rate"
+          description: "User registration rate is {{ $value }} per hour (expected: >10)"
+
+      - alert: HighQueryResponseTime
+        expr: avg(bi_query_duration_seconds) > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High BI query response time"
+          description: "Average query response time is {{ $value }}s (threshold: 5s)"
+
+      - alert: DataPipelineFailure
+        expr: increase(data_pipeline_failures_total[1h]) > 3
+        for: 5m
+        labels:
+          severity: critical
+          team: data
+          pagerduty: true
+        annotations:
+          summary: "Data pipeline failures detected"
+          description: "{{ $value }} pipeline failures in the last hour"
+
+      - alert: LowDataQualityScore
+        expr: data_quality_score < 0.95
+        for: 30m
+        labels:
+          severity: warning
+          team: data
+        annotations:
+          summary: "Data quality score below threshold"
+          description: "Data quality score is {{ $value }} (threshold: 0.95)"
+
+  - name: security_alerts
+    interval: 30s
+    rules:
+      - alert: UnusualAuthenticationFailures
+        expr: rate(authentication_failures_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Unusual number of authentication failures"
+          description: "{{ $value }} authentication failures per second detected"
+
+      - alert: PossibleDDoSAttack
+        expr: rate(http_requests_total[1m]) > 10000
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+          pagerduty: true
+        annotations:
+          summary: "Possible DDoS attack detected"
+          description: "Request rate is {{ $value }} req/s"
+
+      - alert: SSLCertificateExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry - time() < 7 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "SSL certificate expiring soon"
+          description: "SSL certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+
+  - name: sla_alerts
+    interval: 30s
+    rules:
+      - alert: SLAViolation
+        expr: (1 - rate(http_requests_total{status!~"5.."}[5m]) / rate(http_requests_total[5m])) < 0.999
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+          pagerduty: true
+        annotations:
+          summary: "SLA violation detected"
+          description: "Availability is {{ $value | humanizePercentage }} (SLA: 99.9%)"

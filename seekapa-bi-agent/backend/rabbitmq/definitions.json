@@ -1,0 +1,161 @@
+{
+  "rabbit_version": "3.12.0",
+  "rabbitmq_version": "3.12.0",
+  "product_name": "RabbitMQ",
+  "product_version": "3.12.0",
+  "users": [
+    {
+      "name": "seekapa",
+      "password_hash": "password_hash_here",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "seekapa"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "seekapa",
+      "vhost": "seekapa",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "topic_permissions": [],
+  "parameters": [],
+  "global_parameters": [
+    {
+      "name": "cluster_name",
+      "value": "seekapa-cluster"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "seekapa",
+      "name": "TTL-Policy",
+      "pattern": "*.ttl",
+      "apply-to": "queues",
+      "definition": {
+        "message-ttl": 3600000,
+        "expires": 7200000
+      },
+      "priority": 1
+    },
+    {
+      "vhost": "seekapa",
+      "name": "DLQ-Policy",
+      "pattern": "*.dlq",
+      "apply-to": "queues",
+      "definition": {
+        "x-dead-letter-exchange": "dlx",
+        "x-dead-letter-routing-key": "dead"
+      },
+      "priority": 1
+    }
+  ],
+  "queues": [
+    {
+      "name": "bi.queries",
+      "vhost": "seekapa",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "bi.reports",
+      "vhost": "seekapa",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "bi.alerts",
+      "vhost": "seekapa",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10
+      }
+    },
+    {
+      "name": "bi.notifications",
+      "vhost": "seekapa",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "bi.events",
+      "vhost": "seekapa",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "bi.events",
+      "vhost": "seekapa",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "dlx",
+      "vhost": "seekapa",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "bi.events",
+      "vhost": "seekapa",
+      "destination": "bi.queries",
+      "destination_type": "queue",
+      "routing_key": "query.*",
+      "arguments": {}
+    },
+    {
+      "source": "bi.events",
+      "vhost": "seekapa",
+      "destination": "bi.reports",
+      "destination_type": "queue",
+      "routing_key": "report.*",
+      "arguments": {}
+    },
+    {
+      "source": "bi.events",
+      "vhost": "seekapa",
+      "destination": "bi.alerts",
+      "destination_type": "queue",
+      "routing_key": "alert.*",
+      "arguments": {}
+    },
+    {
+      "source": "bi.events",
+      "vhost": "seekapa",
+      "destination": "bi.notifications",
+      "destination_type": "queue",
+      "routing_key": "notification.*",
+      "arguments": {}
+    },
+    {
+      "source": "bi.events",
+      "vhost": "seekapa",
+      "destination": "bi.events",
+      "destination_type": "queue",
+      "routing_key": "event.*",
+      "arguments": {}
+    }
+  ]
+}

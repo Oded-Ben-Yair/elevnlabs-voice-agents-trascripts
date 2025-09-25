@@ -1,0 +1,269 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop, 'feature/**', 'release/**' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  POETRY_VERSION: '1.7.1'
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    name: Backend Tests
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      working-directory: ./backend
+      run: |
+        poetry install --with dev
+        poetry run pip install pytest-cov
+
+    - name: Run linting
+      working-directory: ./backend
+      run: |
+        poetry run ruff check app/
+        poetry run black --check app/
+        poetry run mypy app/
+
+    - name: Run tests with coverage
+      working-directory: ./backend
+      env:
+        DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+        REDIS_URL: redis://localhost:6379
+        SECRET_KEY: test-secret-key
+        ENVIRONMENT: test
+      run: |
+        poetry run pytest tests/ \
+          --cov=app \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          -v
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+        flags: backend
+        name: backend-coverage
+
+    - name: SonarCloud Scan
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      with:
+        projectBaseDir: backend/
+        args: >
+          -Dsonar.organization=seekapa
+          -Dsonar.projectKey=seekapa-bi-agent-backend
+          -Dsonar.python.coverage.reportPaths=coverage.xml
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    name: Frontend Tests
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Run linting
+      working-directory: ./frontend
+      run: |
+        npm run lint
+        npm run type-check
+
+    - name: Run tests with coverage
+      working-directory: ./frontend
+      run: npm run test:coverage
+
+    - name: Build application
+      working-directory: ./frontend
+      run: npm run build
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./frontend/coverage/lcov.info
+        flags: frontend
+        name: frontend-coverage
+
+    - name: Run E2E tests
+      working-directory: ./frontend
+      run: |
+        npx playwright install --with-deps
+        npm run test:e2e
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    name: Performance Tests
+    needs: [backend-tests, frontend-tests]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Run Lighthouse CI
+      working-directory: ./frontend
+      run: |
+        npm install -g @lhci/cli
+        npm run build
+        lhci autorun --config=.lighthouserc.js
+
+    - name: Run k6 performance tests
+      run: |
+        wget https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz
+        tar -xzf k6-v0.47.0-linux-amd64.tar.gz
+        ./k6-v0.47.0-linux-amd64/k6 run tests/performance/load-test.js
+
+  dependency-check:
+    runs-on: ubuntu-latest
+    name: Dependency Security Check
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run dependency check for backend
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'seekapa-bi-agent-backend'
+        path: './backend'
+        format: 'HTML'
+        args: >
+          --enableRetired
+          --enableExperimental
+
+    - name: Upload dependency check results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: dependency-check-report
+        path: reports/
+
+  docker-build:
+    runs-on: ubuntu-latest
+    name: Docker Build Test
+    needs: [backend-tests, frontend-tests]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Backend Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        file: ./backend/Dockerfile
+        push: false
+        tags: seekapa-bi-agent-backend:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build Frontend Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        file: ./frontend/Dockerfile
+        push: false
+        tags: seekapa-bi-agent-frontend:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  api-contract-tests:
+    runs-on: ubuntu-latest
+    name: API Contract Tests
+    needs: backend-tests
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Pact contract tests
+      working-directory: ./backend
+      run: |
+        docker-compose -f docker-compose.test.yml up -d
+        npm install -g @pact-foundation/pact
+        pact verify --provider-base-url http://localhost:8000
+
+    - name: Publish contracts
+      if: github.ref == 'refs/heads/main'
+      run: |
+        pact publish pacts/ --consumer-app-version ${{ github.sha }}
+
+  accessibility-tests:
+    runs-on: ubuntu-latest
+    name: Accessibility Tests
+    needs: frontend-tests
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Run accessibility tests
+      working-directory: ./frontend
+      run: |
+        npm ci
+        npm run build
+        npx pa11y-ci --sitemap http://localhost:3000/sitemap.xml
