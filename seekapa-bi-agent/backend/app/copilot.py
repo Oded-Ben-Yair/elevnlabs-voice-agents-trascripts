@@ -1,446 +1,452 @@
-"""
-Enhanced WebSocket Copilot Service with automatic reconnection,
-message queuing, buffering, and heartbeat functionality.
-"""
-
-import asyncio
+"""Seekapa Copilot - Microsoft Copilot-style Power BI Assistant"""
+import os
 import json
-import logging
-import time
-from typing import Dict, List, Optional, Any, Callable
+import asyncio
 from datetime import datetime, timedelta
-from collections import deque
-from enum import Enum
-import websockets
-import websockets.exceptions
-from websockets.server import WebSocketServerProtocol
-from dataclasses import dataclass, asdict
-from contextlib import asynccontextmanager
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import aiohttp
+from dotenv import load_dotenv
+import uuid
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+load_dotenv("../.env")
 
-class ConnectionState(Enum):
-    DISCONNECTED = "disconnected"
-    CONNECTING = "connecting"
-    CONNECTED = "connected"
-    RECONNECTING = "reconnecting"
-    ERROR = "error"
+app = FastAPI(
+    title="Seekapa Copilot",
+    description="AI-Powered BI Assistant with Conversational Intelligence",
+    version="3.0.0"
+)
 
-@dataclass
-class Message:
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configuration
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_AI_ENDPOINT = os.getenv("AZURE_AI_SERVICES_ENDPOINT")
+GPT5_DEPLOYMENT = os.getenv("GPT5_DEPLOYMENT", "gpt-5")
+POWERBI_TENANT_ID = os.getenv("POWERBI_TENANT_ID")
+POWERBI_CLIENT_ID = os.getenv("POWERBI_CLIENT_ID")
+POWERBI_CLIENT_SECRET = os.getenv("POWERBI_CLIENT_SECRET")
+POWERBI_WORKSPACE_ID = "3260e688-0128-4e8b-b94c-76f9a42e877f"
+POWERBI_API_URL = "https://api.powerbi.com/v1.0/myorg"
+POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+
+# In-memory storage for conversations and insights
+conversations = {}
+insights_queue = []
+pbi_token_cache = {"token": None, "expires": None}
+
+class Message(BaseModel):
+    content: str
+    context: Optional[Dict] = None
+    conversation_id: Optional[str] = None
+
+class Insight(BaseModel):
     id: str
-    type: str
-    data: Any
-    timestamp: float = None
-    retry_count: int = 0
-    max_retries: int = 3
+    title: str
+    description: str
+    severity: str  # "info", "warning", "critical"
+    data: Dict
+    timestamp: datetime
+    actions: List[str]
 
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = time.time()
+class ConversationTurn(BaseModel):
+    id: str
+    user_message: str
+    assistant_response: str
+    data_context: Optional[Dict]
+    timestamp: datetime
+    suggestions: List[str]
 
-    def to_json(self) -> str:
-        return json.dumps(asdict(self))
+async def get_powerbi_token():
+    """Get Power BI access token"""
+    global pbi_token_cache
 
-@dataclass
-class HeartbeatConfig:
-    interval: float = 30.0  # seconds
-    timeout: float = 10.0   # seconds
-    max_missed: int = 3     # consecutive missed heartbeats before disconnect
+    if pbi_token_cache["token"] and pbi_token_cache["expires"] and datetime.now() < pbi_token_cache["expires"]:
+        return pbi_token_cache["token"]
 
-class WebSocketConnection:
-    """Enhanced WebSocket connection with automatic reconnection and message queuing."""
+    token_url = f"https://login.microsoftonline.com/{POWERBI_TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        'client_id': POWERBI_CLIENT_ID,
+        'client_secret': POWERBI_CLIENT_SECRET,
+        'scope': POWERBI_SCOPE,
+        'grant_type': 'client_credentials'
+    }
 
-    def __init__(self, websocket: WebSocketServerProtocol, client_id: str):
-        self.websocket = websocket
-        self.client_id = client_id
-        self.state = ConnectionState.CONNECTED
-        self.message_queue: deque = deque(maxlen=1000)  # Buffer up to 1000 messages
-        self.pending_messages: Dict[str, Message] = {}
-        self.last_heartbeat = time.time()
-        self.heartbeat_config = HeartbeatConfig()
-        self.missed_heartbeats = 0
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 10
-        self.reconnect_delay = 1.0  # Initial delay in seconds
-        self.max_reconnect_delay = 60.0
-        self.created_at = datetime.utcnow()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=data) as resp:
+            if resp.status == 200:
+                token_data = await resp.json()
+                pbi_token_cache["token"] = token_data['access_token']
+                pbi_token_cache["expires"] = datetime.now() + timedelta(seconds=token_data.get('expires_in', 3600))
+                return pbi_token_cache["token"]
+            raise Exception("Failed to get Power BI token")
 
-        # Start heartbeat task
-        self._heartbeat_task = None
-        self._message_processor_task = None
+async def get_reports():
+    """Get all Power BI reports"""
+    try:
+        token = await get_powerbi_token()
+        headers = {'Authorization': f'Bearer {token}'}
+        url = f"{POWERBI_API_URL}/groups/{POWERBI_WORKSPACE_ID}/reports"
 
-    async def start_background_tasks(self):
-        """Start background tasks for heartbeat and message processing."""
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        self._message_processor_task = asyncio.create_task(self._message_processor())
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('value', [])
+    except Exception as e:
+        print(f"Error getting reports: {e}")
+    return []
 
-    async def stop_background_tasks(self):
-        """Stop background tasks."""
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-        if self._message_processor_task:
-            self._message_processor_task.cancel()
+async def analyze_data_context(query: str) -> Dict:
+    """Analyze query to understand data context"""
+    query_lower = query.lower()
 
-    async def _heartbeat_loop(self):
-        """Send periodic heartbeat messages to maintain connection."""
-        while self.state in [ConnectionState.CONNECTED, ConnectionState.RECONNECTING]:
-            try:
-                await asyncio.sleep(self.heartbeat_config.interval)
+    context = {
+        "intent": "unknown",
+        "timeframe": None,
+        "metrics": [],
+        "dimensions": [],
+        "report_context": None
+    }
 
-                if self.state == ConnectionState.CONNECTED:
-                    heartbeat_msg = Message(
-                        id=f"heartbeat_{int(time.time())}",
-                        type="heartbeat",
-                        data={"timestamp": time.time()}
-                    )
+    # Detect intent
+    if any(word in query_lower for word in ["trend", "over time", "historical"]):
+        context["intent"] = "trend_analysis"
+    elif any(word in query_lower for word in ["compare", "versus", "vs", "difference"]):
+        context["intent"] = "comparison"
+    elif any(word in query_lower for word in ["top", "best", "highest", "lowest"]):
+        context["intent"] = "ranking"
+    elif any(word in query_lower for word in ["total", "sum", "count", "average"]):
+        context["intent"] = "aggregation"
+    elif any(word in query_lower for word in ["predict", "forecast", "will"]):
+        context["intent"] = "prediction"
 
-                    await self.send_message(heartbeat_msg)
+    # Detect timeframe
+    if "today" in query_lower:
+        context["timeframe"] = "today"
+    elif "yesterday" in query_lower:
+        context["timeframe"] = "yesterday"
+    elif "this week" in query_lower:
+        context["timeframe"] = "current_week"
+    elif "this month" in query_lower:
+        context["timeframe"] = "current_month"
+    elif "this year" in query_lower:
+        context["timeframe"] = "current_year"
+    elif "last month" in query_lower:
+        context["timeframe"] = "previous_month"
 
-                    # Check for missed heartbeats
-                    time_since_last = time.time() - self.last_heartbeat
-                    if time_since_last > self.heartbeat_config.timeout:
-                        self.missed_heartbeats += 1
-                        logger.warning(f"Missed heartbeat for client {self.client_id}. Count: {self.missed_heartbeats}")
+    # Detect metrics
+    if any(word in query_lower for word in ["sales", "revenue"]):
+        context["metrics"].append("sales")
+    if any(word in query_lower for word in ["customer", "client"]):
+        context["metrics"].append("customers")
+    if any(word in query_lower for word in ["product", "item"]):
+        context["metrics"].append("products")
+    if any(word in query_lower for word in ["conversion", "rate"]):
+        context["metrics"].append("conversion")
 
-                        if self.missed_heartbeats >= self.heartbeat_config.max_missed:
-                            logger.error(f"Too many missed heartbeats for client {self.client_id}. Initiating reconnection.")
-                            await self.handle_disconnect()
-                    else:
-                        self.missed_heartbeats = 0
+    return context
 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in heartbeat loop for client {self.client_id}: {e}")
+async def generate_suggestions(context: Dict) -> List[str]:
+    """Generate contextual follow-up suggestions"""
+    suggestions = []
 
-    async def _message_processor(self):
-        """Process queued messages with retry logic."""
-        while self.state != ConnectionState.DISCONNECTED:
-            try:
-                if self.message_queue and self.state == ConnectionState.CONNECTED:
-                    message = self.message_queue.popleft()
-                    success = await self._send_raw_message(message)
+    if context["intent"] == "trend_analysis":
+        suggestions.extend([
+            "Show me the forecast for next month",
+            "What factors are driving this trend?",
+            "Compare this to the same period last year"
+        ])
+    elif context["intent"] == "comparison":
+        suggestions.extend([
+            "What's the percentage difference?",
+            "Show me the breakdown by category",
+            "Which segment is performing better?"
+        ])
+    elif context["intent"] == "ranking":
+        suggestions.extend([
+            "Show me the bottom performers",
+            "What's the distribution across all items?",
+            "How has the ranking changed over time?"
+        ])
+    elif context["intent"] == "aggregation":
+        suggestions.extend([
+            "Break this down by region",
+            "Show me the monthly trend",
+            "What's the year-over-year growth?"
+        ])
+    else:
+        suggestions.extend([
+            "Show me total sales",
+            "What are the top products?",
+            "How are we performing this month?"
+        ])
 
-                    if not success and message.retry_count < message.max_retries:
-                        message.retry_count += 1
-                        self.message_queue.appendleft(message)  # Re-queue for retry
-                        await asyncio.sleep(min(2 ** message.retry_count, 10))  # Exponential backoff
+    return suggestions[:3]  # Return top 3 suggestions
 
-                await asyncio.sleep(0.1)  # Small delay to prevent busy waiting
+async def call_gpt5_streaming(messages: List[Dict]):
+    """Call GPT-5 with streaming response"""
+    headers = {
+        "api-key": AZURE_OPENAI_API_KEY,
+        "Content-Type": "application/json"
+    }
 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in message processor for client {self.client_id}: {e}")
-                await asyncio.sleep(1)
+    url = f"{AZURE_AI_ENDPOINT}/openai/deployments/{GPT5_DEPLOYMENT}/chat/completions?api-version=2025-01-01-preview"
 
-    async def send_message(self, message: Message) -> bool:
-        """Queue message for sending with automatic retry."""
-        self.message_queue.append(message)
-        return True
+    system_message = {
+        "role": "system",
+        "content": """You are Seekapa Copilot, an intelligent business analytics assistant inspired by Microsoft Copilot for Power BI.
 
-    async def _send_raw_message(self, message: Message) -> bool:
-        """Send message directly to WebSocket."""
-        try:
-            if self.websocket and not self.websocket.closed:
-                await self.websocket.send(message.to_json())
-                logger.debug(f"Sent message {message.id} to client {self.client_id}")
-                return True
+Your personality:
+- Professional yet conversational
+- Proactive in suggesting insights
+- Clear and concise in explanations
+- Focused on actionable intelligence
+
+Your capabilities:
+- Analyze business data and trends
+- Generate insights from Power BI reports
+- Provide predictive analytics
+- Suggest next best actions
+- Explain complex metrics simply
+
+Always:
+- Start responses directly without pleasantries
+- Use data to support insights
+- Suggest follow-up questions
+- Highlight important findings with emphasis
+- Keep responses concise (2-3 sentences for simple queries, 1 paragraph for complex)
+
+Format insights using:
+- **Bold** for key metrics
+- Numbers and percentages prominently
+- Clear cause-effect relationships
+- Actionable recommendations"""
+    }
+
+    body = {
+        "messages": [system_message] + messages,
+        "max_completion_tokens": 800,
+        "stream": True
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=body) as resp:
+            if resp.status == 200:
+                async for line in resp.content:
+                    if line:
+                        yield line
             else:
-                logger.warning(f"WebSocket closed for client {self.client_id}")
-                await self.handle_disconnect()
-                return False
+                yield b"Unable to process your request at this moment."
 
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning(f"Connection closed for client {self.client_id}")
-            await self.handle_disconnect()
-            return False
-        except Exception as e:
-            logger.error(f"Error sending message to client {self.client_id}: {e}")
-            return False
+async def call_gpt5(messages: List[Dict]) -> str:
+    """Call GPT-5 without streaming"""
+    headers = {
+        "api-key": AZURE_OPENAI_API_KEY,
+        "Content-Type": "application/json"
+    }
 
-    async def handle_message(self, raw_message: str) -> Optional[Message]:
-        """Handle incoming message from client."""
-        try:
-            data = json.loads(raw_message)
-            message = Message(
-                id=data.get('id', f"msg_{int(time.time())}"),
-                type=data.get('type', 'unknown'),
-                data=data.get('data', {})
-            )
+    url = f"{AZURE_AI_ENDPOINT}/openai/deployments/{GPT5_DEPLOYMENT}/chat/completions?api-version=2025-01-01-preview"
 
-            # Handle heartbeat responses
-            if message.type == "heartbeat_response":
-                self.last_heartbeat = time.time()
-                self.missed_heartbeats = 0
-                return None
+    system_message = {
+        "role": "system",
+        "content": """You are Seekapa Copilot, an intelligent business analytics assistant inspired by Microsoft Copilot for Power BI.
 
-            return message
+Your personality:
+- Professional yet conversational
+- Proactive in suggesting insights
+- Clear and concise in explanations
+- Focused on actionable intelligence
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON from client {self.client_id}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error handling message from client {self.client_id}: {e}")
-            return None
+Your capabilities:
+- Analyze business data and trends
+- Generate insights from Power BI reports
+- Provide predictive analytics
+- Suggest next best actions
+- Explain complex metrics simply
 
-    async def handle_disconnect(self):
-        """Handle client disconnection and initiate reconnection if needed."""
-        self.state = ConnectionState.DISCONNECTED
-        await self.stop_background_tasks()
+Always:
+- Start responses directly without pleasantries
+- Use data to support insights
+- Suggest follow-up questions
+- Highlight important findings with emphasis
+- Keep responses concise (2-3 sentences for simple queries, 1 paragraph for complex)
 
-        if self.websocket and not self.websocket.closed:
-            try:
-                await self.websocket.close()
-            except Exception as e:
-                logger.error(f"Error closing WebSocket for client {self.client_id}: {e}")
+Format insights using:
+- **Bold** for key metrics
+- Numbers and percentages prominently
+- Clear cause-effect relationships
+- Actionable recommendations"""
+    }
 
-    def get_connection_info(self) -> Dict[str, Any]:
-        """Get connection information and statistics."""
-        return {
-            "client_id": self.client_id,
-            "state": self.state.value,
-            "queue_size": len(self.message_queue),
-            "pending_messages": len(self.pending_messages),
-            "missed_heartbeats": self.missed_heartbeats,
-            "reconnect_attempts": self.reconnect_attempts,
-            "created_at": self.created_at.isoformat(),
-            "last_heartbeat": datetime.fromtimestamp(self.last_heartbeat).isoformat()
-        }
+    body = {
+        "messages": [system_message] + messages,
+        "max_completion_tokens": 800,
+        "stream": False
+    }
 
-class WebSocketCopilotManager:
-    """Manager for WebSocket connections with enhanced features."""
-
-    def __init__(self):
-        self.connections: Dict[str, WebSocketConnection] = {}
-        self.message_handlers: Dict[str, Callable] = {}
-        self.connection_callbacks: Dict[str, Callable] = {}
-        self.global_message_queue: deque = deque(maxlen=10000)
-        self.statistics = {
-            "total_connections": 0,
-            "active_connections": 0,
-            "messages_sent": 0,
-            "messages_received": 0,
-            "reconnections": 0
-        }
-
-    def register_message_handler(self, message_type: str, handler: Callable):
-        """Register handler for specific message types."""
-        self.message_handlers[message_type] = handler
-
-    def register_connection_callback(self, event: str, callback: Callable):
-        """Register callback for connection events (connect, disconnect, error)."""
-        self.connection_callbacks[event] = callback
-
-    async def handle_new_connection(self, websocket: WebSocketServerProtocol, client_id: str):
-        """Handle new WebSocket connection."""
-        try:
-            connection = WebSocketConnection(websocket, client_id)
-            self.connections[client_id] = connection
-
-            # Start background tasks
-            await connection.start_background_tasks()
-
-            # Update statistics
-            self.statistics["total_connections"] += 1
-            self.statistics["active_connections"] += 1
-
-            # Call connection callback
-            if "connect" in self.connection_callbacks:
-                await self.connection_callbacks["connect"](connection)
-
-            logger.info(f"New WebSocket connection established: {client_id}")
-
-            # Send welcome message
-            welcome_msg = Message(
-                id=f"welcome_{int(time.time())}",
-                type="welcome",
-                data={
-                    "client_id": client_id,
-                    "server_time": time.time(),
-                    "features": ["heartbeat", "message_queuing", "auto_reconnect"]
-                }
-            )
-            await connection.send_message(welcome_msg)
-
-            # Listen for messages
-            async for raw_message in websocket:
-                message = await connection.handle_message(raw_message)
-                if message:
-                    await self.process_message(connection, message)
-
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"Client {client_id} disconnected")
-        except Exception as e:
-            logger.error(f"Error handling connection for {client_id}: {e}")
-        finally:
-            await self.handle_disconnection(client_id)
-
-    async def process_message(self, connection: WebSocketConnection, message: Message):
-        """Process incoming message from client."""
-        try:
-            self.statistics["messages_received"] += 1
-
-            # Handle message based on type
-            if message.type in self.message_handlers:
-                response = await self.message_handlers[message.type](connection, message)
-                if response:
-                    await connection.send_message(response)
-            else:
-                # Default handling for unknown message types
-                logger.warning(f"Unknown message type: {message.type} from client {connection.client_id}")
-
-                error_response = Message(
-                    id=f"error_{int(time.time())}",
-                    type="error",
-                    data={
-                        "error": "unknown_message_type",
-                        "original_message_id": message.id,
-                        "message": f"Unknown message type: {message.type}"
-                    }
-                )
-                await connection.send_message(error_response)
-
-        except Exception as e:
-            logger.error(f"Error processing message from {connection.client_id}: {e}")
-
-    async def handle_disconnection(self, client_id: str):
-        """Handle client disconnection cleanup."""
-        if client_id in self.connections:
-            connection = self.connections[client_id]
-            await connection.handle_disconnect()
-
-            # Update statistics
-            self.statistics["active_connections"] = max(0, self.statistics["active_connections"] - 1)
-
-            # Call disconnection callback
-            if "disconnect" in self.connection_callbacks:
-                await self.connection_callbacks["disconnect"](connection)
-
-            # Remove from active connections
-            del self.connections[client_id]
-
-            logger.info(f"Client {client_id} disconnection handled")
-
-    async def broadcast_message(self, message: Message, exclude_clients: Optional[List[str]] = None):
-        """Broadcast message to all connected clients."""
-        exclude_clients = exclude_clients or []
-
-        for client_id, connection in self.connections.items():
-            if client_id not in exclude_clients and connection.state == ConnectionState.CONNECTED:
-                await connection.send_message(message)
-
-        self.statistics["messages_sent"] += len(self.connections) - len(exclude_clients)
-
-    async def send_to_client(self, client_id: str, message: Message) -> bool:
-        """Send message to specific client."""
-        if client_id in self.connections:
-            success = await self.connections[client_id].send_message(message)
-            if success:
-                self.statistics["messages_sent"] += 1
-            return success
-        return False
-
-    def get_connection_info(self, client_id: str) -> Optional[Dict[str, Any]]:
-        """Get connection information for specific client."""
-        if client_id in self.connections:
-            return self.connections[client_id].get_connection_info()
-        return None
-
-    def get_all_connections_info(self) -> Dict[str, Any]:
-        """Get information about all connections."""
-        return {
-            "statistics": self.statistics,
-            "active_connections": {
-                client_id: conn.get_connection_info()
-                for client_id, conn in self.connections.items()
-            }
-        }
-
-    async def health_check(self) -> Dict[str, Any]:
-        """Perform health check on all connections."""
-        healthy_connections = 0
-        unhealthy_connections = 0
-
-        for connection in self.connections.values():
-            if connection.state == ConnectionState.CONNECTED:
-                # Check if connection is responsive
-                time_since_heartbeat = time.time() - connection.last_heartbeat
-                if time_since_heartbeat < connection.heartbeat_config.timeout * 2:
-                    healthy_connections += 1
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('choices', [{}])[0].get('message', {}).get('content', 'Unable to process your request.')
                 else:
-                    unhealthy_connections += 1
-            else:
-                unhealthy_connections += 1
+                    error_text = await resp.text()
+                    print(f"GPT-5 API error: {resp.status} - {error_text}")
+                    return "Unable to process your request at this moment."
+    except Exception as e:
+        print(f"Error calling GPT-5: {e}")
+        return "I'm having trouble connecting to the AI service. Please try again."
 
-        return {
-            "status": "healthy" if unhealthy_connections == 0 else "degraded",
-            "healthy_connections": healthy_connections,
-            "unhealthy_connections": unhealthy_connections,
-            "total_connections": len(self.connections),
-            "statistics": self.statistics
-        }
+async def detect_anomalies() -> List[Insight]:
+    """Detect anomalies in data and generate insights"""
+    insights = []
 
-# Global manager instance
-copilot_manager = WebSocketCopilotManager()
+    # Simulated anomaly detection (in production, this would analyze real data)
+    current_hour = datetime.now().hour
 
-# Example message handlers
-async def handle_query_message(connection: WebSocketConnection, message: Message) -> Message:
-    """Handle query-type messages."""
-    # This would integrate with your BI query engine
-    query_data = message.data.get('query', '')
+    if current_hour >= 8 and current_hour <= 10:  # Morning insight
+        insights.append(Insight(
+            id=str(uuid.uuid4()),
+            title="Morning Sales Spike Detected",
+            description="Sales are **35% higher** than typical Monday mornings. Customer activity peaked at 8:45 AM.",
+            severity="info",
+            data={"sales_increase": 35, "peak_time": "8:45 AM"},
+            timestamp=datetime.now(),
+            actions=["View detailed breakdown", "Compare with last Monday", "Analyze customer segments"]
+        ))
 
-    # Simulate query processing
-    await asyncio.sleep(0.1)
+    if current_hour >= 13 and current_hour <= 15:  # Afternoon alert
+        insights.append(Insight(
+            id=str(uuid.uuid4()),
+            title="Conversion Rate Below Target",
+            description="Current conversion rate is **2.3%**, below the 3% target. Mobile traffic showing lowest conversion.",
+            severity="warning",
+            data={"current_rate": 2.3, "target_rate": 3.0, "problem_channel": "mobile"},
+            timestamp=datetime.now(),
+            actions=["Analyze mobile UX", "Review checkout funnel", "Compare channel performance"]
+        ))
 
-    response = Message(
-        id=f"query_response_{int(time.time())}",
-        type="query_response",
-        data={
-            "original_message_id": message.id,
-            "query": query_data,
-            "result": "Query processed successfully",
-            "execution_time": 100,
-            "timestamp": time.time()
-        }
-    )
+    return insights
 
-    return response
+@app.get("/")
+async def root():
+    return {
+        "name": "Seekapa Copilot",
+        "version": "3.0.0",
+        "status": "ready",
+        "style": "Microsoft Copilot for Power BI"
+    }
 
-async def handle_subscribe_message(connection: WebSocketConnection, message: Message) -> Message:
-    """Handle subscription messages for real-time data."""
-    topic = message.data.get('topic', '')
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    """WebSocket endpoint for real-time chat"""
+    await websocket.accept()
+    conversation_id = str(uuid.uuid4())
+    conversations[conversation_id] = []
 
-    # Add client to subscription list (would integrate with your event system)
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_json()
+            user_message = data.get("message", "")
 
-    response = Message(
-        id=f"subscription_response_{int(time.time())}",
-        type="subscription_response",
-        data={
-            "original_message_id": message.id,
-            "topic": topic,
-            "status": "subscribed",
-            "message": f"Successfully subscribed to {topic}"
-        }
-    )
+            # Analyze context
+            context = await analyze_data_context(user_message)
 
-    return response
+            # Get relevant reports
+            reports = await get_reports()
+            relevant_report = None
+            if reports and context["metrics"]:
+                for report in reports:
+                    if any(metric in report.get('name', '').lower() for metric in context["metrics"]):
+                        relevant_report = report
+                        break
 
-# Register default handlers
-copilot_manager.register_message_handler("query", handle_query_message)
-copilot_manager.register_message_handler("subscribe", handle_subscribe_message)
+            # Prepare conversation context
+            messages = [{"role": "user", "content": user_message}]
+            if conversations[conversation_id]:
+                # Add last 3 turns for context
+                for turn in conversations[conversation_id][-3:]:
+                    messages.insert(0, {"role": "assistant", "content": turn["assistant_response"]})
+                    messages.insert(0, {"role": "user", "content": turn["user_message"]})
 
-# Connection event handlers
-async def on_client_connect(connection: WebSocketConnection):
-    """Handle client connection events."""
-    logger.info(f"Client connected: {connection.client_id}")
+            # Get AI response (non-streaming for WebSocket)
+            ai_response = await call_gpt5(messages)
 
-async def on_client_disconnect(connection: WebSocketConnection):
-    """Handle client disconnection events."""
-    logger.info(f"Client disconnected: {connection.client_id}")
+            # Generate suggestions
+            suggestions = await generate_suggestions(context)
 
-copilot_manager.register_connection_callback("connect", on_client_connect)
-copilot_manager.register_connection_callback("disconnect", on_client_disconnect)
+            # Store conversation turn
+            turn = {
+                "user_message": user_message,
+                "assistant_response": ai_response,
+                "context": context,
+                "suggestions": suggestions,
+                "timestamp": datetime.now().isoformat()
+            }
+            conversations[conversation_id].append(turn)
+
+            # Send response
+            response = {
+                "type": "response",
+                "message": ai_response,
+                "suggestions": suggestions,
+                "context": context,
+                "report": relevant_report
+            }
+
+            await websocket.send_json(response)
+
+    except WebSocketDisconnect:
+        if conversation_id in conversations:
+            del conversations[conversation_id]
+
+@app.get("/api/insights/latest")
+async def get_latest_insights():
+    """Get latest insights and anomalies"""
+    insights = await detect_anomalies()
+    return {"insights": [insight.dict() for insight in insights]}
+
+@app.get("/api/insights/subscribe")
+async def subscribe_to_insights():
+    """Server-sent events for real-time insights"""
+    async def generate():
+        while True:
+            insights = await detect_anomalies()
+            if insights:
+                for insight in insights:
+                    yield f"data: {json.dumps(insight.dict())}\n\n"
+            await asyncio.sleep(30)  # Check every 30 seconds
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.post("/api/chat/message")
+async def process_message(message: Message):
+    """Process a single message (REST alternative to WebSocket)"""
+    context = await analyze_data_context(message.content)
+
+    messages = [{"role": "user", "content": message.content}]
+    ai_response = await call_gpt5(messages)
+
+    suggestions = await generate_suggestions(context)
+
+    return {
+        "response": ai_response,
+        "suggestions": suggestions,
+        "context": context
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
