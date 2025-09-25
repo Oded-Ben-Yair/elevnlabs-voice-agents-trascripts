@@ -15,6 +15,7 @@ export const InsightsDashboard = lazy(() => import('./InsightsDashboard'))
 export const DataVisualization = lazy(() => import('./DataVisualization'))
 export const SettingsPanel = lazy(() => import('./SettingsPanel'))
 export const VirtualizedList = lazy(() => import('./VirtualizedList'))
+export const ExecutiveDashboard = lazy(() => import('./ExecutiveDashboard'))
 
 // Higher-order component for lazy loading with suspense
 export const withLazyLoading = <P extends object>(Component: React.ComponentType<P>) => {
@@ -31,5 +32,6 @@ export const preloadComponents = () => {
   setTimeout(() => {
     import('./InsightsDashboard')
     import('./DataVisualization')
+    import('./ExecutiveDashboard')
   }, 2000)
 }

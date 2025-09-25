@@ -29,6 +29,8 @@ interface AppState {
   // UI state
   insights: Insight[]
   showInsights: boolean
+  currentView: 'chat' | 'visualizations' | 'settings' | 'executive'
+  isExecutiveMode: boolean
 
   // Performance tracking
   webVitals: {
@@ -47,6 +49,9 @@ interface AppState {
   setWsConnection: (ws: WebSocket | null) => void
   setInsights: (insights: Insight[]) => void
   setShowInsights: (show: boolean) => void
+  setCurrentView: (view: AppState['currentView']) => void
+  setIsExecutiveMode: (isExecutive: boolean) => void
+  toggleExecutiveMode: () => void
   setWebVitals: (vitals: Partial<AppState['webVitals']>) => void
 
   // WebSocket actions
@@ -123,6 +128,8 @@ export const useAppStore = create<AppState>()(
     wsConnection: null,
     insights: [],
     showInsights: false,
+    currentView: 'chat',
+    isExecutiveMode: false,
     webVitals: {},
 
     // Actions
@@ -139,6 +146,12 @@ export const useAppStore = create<AppState>()(
     setWsConnection: (wsConnection) => set({ wsConnection }),
     setInsights: (insights) => set({ insights }),
     setShowInsights: (showInsights) => set({ showInsights }),
+    setCurrentView: (currentView) => set({ currentView }),
+    setIsExecutiveMode: (isExecutiveMode) => set({ isExecutiveMode }),
+    toggleExecutiveMode: () => set(state => ({
+      isExecutiveMode: !state.isExecutiveMode,
+      currentView: !state.isExecutiveMode ? 'executive' : 'chat'
+    })),
     setWebVitals: (vitals) => set(state => ({
       webVitals: { ...state.webVitals, ...vitals }
     })),

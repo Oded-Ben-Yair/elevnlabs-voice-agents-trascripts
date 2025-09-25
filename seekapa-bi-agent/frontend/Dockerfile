@@ -68,8 +68,11 @@ FROM base as builder
 
 WORKDIR /app
 
-# Copy dependencies from deps stage
-COPY --from=deps /app/node_modules ./node_modules
+# Copy package files
+COPY package*.json ./
+
+# Install all dependencies (including dev dependencies for build)
+RUN npm ci --include=dev
 
 # Copy source code
 COPY . .
