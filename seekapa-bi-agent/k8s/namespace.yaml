@@ -1,0 +1,199 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: seekapa
+  labels:
+    name: seekapa
+    app: seekapa-bi-agent
+    environment: production
+  annotations:
+    description: "Seekapa BI Agent application namespace"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: seekapa-monitoring
+  labels:
+    name: seekapa-monitoring
+    app: seekapa-bi-agent
+    tier: monitoring
+  annotations:
+    description: "Seekapa BI Agent monitoring namespace"
+
+---
+# ServiceAccount for Seekapa application
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seekapa-service-account
+  namespace: seekapa
+  labels:
+    app: seekapa
+
+---
+# ServiceAccount for monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seekapa-monitoring-service-account
+  namespace: seekapa-monitoring
+  labels:
+    app: seekapa-monitoring
+
+---
+# Role for Seekapa application
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: seekapa-role
+  namespace: seekapa
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+
+---
+# RoleBinding for Seekapa application
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: seekapa-role-binding
+  namespace: seekapa
+subjects:
+- kind: ServiceAccount
+  name: seekapa-service-account
+  namespace: seekapa
+roleRef:
+  kind: Role
+  name: seekapa-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRole for monitoring (needs cluster-wide access)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: seekapa-monitoring-cluster-role
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding for monitoring
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: seekapa-monitoring-cluster-role-binding
+subjects:
+- kind: ServiceAccount
+  name: seekapa-monitoring-service-account
+  namespace: seekapa-monitoring
+roleRef:
+  kind: ClusterRole
+  name: seekapa-monitoring-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# NetworkPolicy for application security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seekapa-network-policy
+  namespace: seekapa
+spec:
+  podSelector:
+    matchLabels:
+      app: seekapa-backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: seekapa-frontend
+    - podSelector:
+        matchLabels:
+          app: nginx-ingress
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: seekapa-postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: seekapa-redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+
+---
+# NetworkPolicy for database
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seekapa-postgres-network-policy
+  namespace: seekapa
+spec:
+  podSelector:
+    matchLabels:
+      app: seekapa-postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: seekapa-backend
+    ports:
+    - protocol: TCP
+      port: 5432
+
+---
+# NetworkPolicy for Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seekapa-redis-network-policy
+  namespace: seekapa
+spec:
+  podSelector:
+    matchLabels:
+      app: seekapa-redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: seekapa-backend
+    ports:
+    - protocol: TCP
+      port: 6379

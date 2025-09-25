@@ -1,0 +1,243 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seekapa-config
+  namespace: seekapa
+  labels:
+    app: seekapa
+data:
+  # Application settings
+  node-env: "production"
+  app-name: "seekapa-bi-agent"
+  app-port: "8000"
+  frontend-port: "3000"
+
+  # API configuration
+  api-url: "https://api.seekapa.ai"
+  api-version: "2.0.0"
+
+  # Azure AI configuration (non-sensitive)
+  azure-ai-endpoint: "https://brn-azai.cognitiveservices.azure.com/"
+  azure-ai-project-endpoint: "https://brn-azai.services.ai.azure.com/api/projects/seekapa_ai"
+  azure-openai-api-version: "2025-01-01-preview"
+
+  # Model deployments
+  gpt5-deployment: "gpt-5"
+  gpt5-mini-deployment: "gpt-5-mini"
+  gpt5-nano-deployment: "gpt-5-nano"
+  gpt5-chat-deployment: "gpt-5-chat"
+
+  # Power BI configuration (non-sensitive)
+  powerbi-workspace-id: "3260e688-0128-4e8b-b94c-76f9a42e877f"
+  powerbi-dataset-id: "7f5e809a-79e5-4d51-9448-6905a55771a9"
+  powerbi-api-url: "https://api.powerbi.com/v1.0/myorg"
+  powerbi-authority: "https://login.microsoftonline.com/318030de-752f-42b3-9848-abd6ec3809e3"
+  powerbi-scope: "https://analysis.windows.net/powerbi/api/.default"
+
+  # Database configuration (non-sensitive)
+  postgres-db: "seekapa_bi"
+  postgres-port: "5432"
+
+  # Redis configuration
+  redis-port: "6379"
+  cache-ttl: "3600"
+
+  # Azure resources
+  azure-subscription-id: "08b0ac81-a17e-421c-8c1b-41b59ee758a3"
+  azure-resource-group: "AZAI_group"
+  azure-location: "swedencentral"
+
+  # Security settings
+  jwt-algorithm: "HS256"
+  access-token-expire-minutes: "30"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seekapa-nginx-config
+  namespace: seekapa
+  labels:
+    app: seekapa-nginx
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+        use epoll;
+        multi_accept on;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        client_max_body_size 16M;
+
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_proxied any;
+        gzip_comp_level 6;
+        gzip_types
+            application/atom+xml
+            application/javascript
+            application/json
+            application/rss+xml
+            application/vnd.ms-fontobject
+            application/x-font-ttf
+            application/x-web-app-manifest+json
+            application/xhtml+xml
+            application/xml
+            font/opentype
+            image/svg+xml
+            image/x-icon
+            text/css
+            text/plain
+            text/x-component;
+
+        upstream backend {
+            least_conn;
+            server seekapa-backend-service:8000;
+        }
+
+        upstream frontend {
+            least_conn;
+            server seekapa-frontend-service:80;
+        }
+
+        server {
+            listen 80;
+            server_name _;
+
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+
+            location /api/ {
+                proxy_pass http://backend/api/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location / {
+                proxy_pass http://frontend/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+        }
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seekapa-redis-config
+  namespace: seekapa
+  labels:
+    app: seekapa-redis
+data:
+  redis.conf: |
+    # Redis configuration for Kubernetes
+    bind 0.0.0.0
+    port 6379
+
+    # Memory management
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+
+    # Persistence
+    appendonly yes
+    appendfsync everysec
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+
+    # Networking
+    tcp-keepalive 300
+    timeout 300
+
+    # Security
+    protected-mode yes
+
+    # Logging
+    loglevel notice
+
+    # Performance tuning
+    tcp-backlog 511
+    databases 16
+    save 900 1
+    save 300 10
+    save 60 10000
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seekapa-postgres-init
+  namespace: seekapa
+  labels:
+    app: seekapa-postgres
+data:
+  init.sql: |
+    -- Initialize Seekapa BI database
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+
+    -- Create users table
+    CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        username VARCHAR(255) UNIQUE NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+
+    -- Create sessions table
+    CREATE TABLE IF NOT EXISTS sessions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        session_token VARCHAR(255) UNIQUE NOT NULL,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+
+    -- Create queries table
+    CREATE TABLE IF NOT EXISTS queries (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        query_text TEXT NOT NULL,
+        response_data JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+
+    -- Create indexes
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(session_token);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_queries_user_id ON queries(user_id);
+    CREATE INDEX IF NOT EXISTS idx_queries_created_at ON queries(created_at);
+
+    -- Insert default admin user (password should be changed)
+    INSERT INTO users (username, email) VALUES ('admin', 'admin@seekapa.com')
+    ON CONFLICT (email) DO NOTHING;

@@ -1,74 +1,218 @@
-# Multi-stage build for React frontend
-FROM node:18-alpine as builder
+# Multi-stage Dockerfile for React Frontend
+# Stage 1: Base Node environment
+FROM node:18-alpine as base
 
-# Install dependencies for node-gyp
-RUN apk add --no-cache python3 make g++
+# Set environment variables
+ENV NODE_ENV=production \
+    NPM_CONFIG_CACHE=/tmp/.npm
 
-# Set working directory
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    python3 \
+    make \
+    g++
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
+
+# Stage 2: Development environment
+FROM base as development
+
+# Set development environment
+ENV NODE_ENV=development
+
+# Set work directory
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install dependencies (including dev dependencies)
+RUN npm ci --include=dev
 
-# Copy application code
+# Copy source code
 COPY . .
 
-# Build arguments for environment variables
-ARG REACT_APP_API_URL
-ARG REACT_APP_VERSION
+# Change ownership to non-root user
+RUN chown -R nextjs:nodejs /app
+
+USER nextjs
+
+# Expose port
+EXPOSE 3000
+
+# Health check for development
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000 || exit 1
+
+# Development command with hot reload
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+
+# Stage 3: Dependencies installation
+FROM base as deps
+
+# Set work directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install production dependencies only
+RUN npm ci --only=production && npm cache clean --force
+
+# Stage 4: Build application
+FROM base as builder
+
+WORKDIR /app
+
+# Copy dependencies from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy source code
+COPY . .
+
+# Set build-time environment variables
+ARG VITE_API_URL=http://localhost:8000
+ARG VITE_APP_NAME="Seekapa BI Agent"
+ARG VITE_APP_VERSION="2.0.0"
+ARG REACT_APP_API_URL=http://localhost:8000
+ARG REACT_APP_VERSION="2.0.0"
 ARG REACT_APP_ENVIRONMENT=production
 
-# Set environment variables for build
-ENV REACT_APP_API_URL=$REACT_APP_API_URL \
+ENV VITE_API_URL=$VITE_API_URL \
+    VITE_APP_NAME=$VITE_APP_NAME \
+    VITE_APP_VERSION=$VITE_APP_VERSION \
+    REACT_APP_API_URL=$REACT_APP_API_URL \
     REACT_APP_VERSION=$REACT_APP_VERSION \
-    REACT_APP_ENVIRONMENT=$REACT_APP_ENVIRONMENT \
-    NODE_ENV=production
+    REACT_APP_ENVIRONMENT=$REACT_APP_ENVIRONMENT
 
 # Build the application
 RUN npm run build
 
-# Production stage with nginx
-FROM nginx:alpine
+# Remove source code after build
+RUN rm -rf src/ public/ *.config.* *.json
+
+# Stage 5: Nginx runtime for production
+FROM nginx:alpine as production
 
 # Install curl for health checks
 RUN apk add --no-cache curl
 
-# Remove default nginx config
-RUN rm -rf /etc/nginx/conf.d/*
+# Remove default nginx configuration
+RUN rm /etc/nginx/conf.d/default.conf
 
-# Copy custom nginx config
+# Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
-COPY default.conf /etc/nginx/conf.d/default.conf
+COPY nginx/conf.d/ /etc/nginx/conf.d/
 
-# Copy built application from builder
+# Copy built application from builder stage
+COPY --from=builder /app/dist /usr/share/nginx/html
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Create non-root user
-RUN addgroup -g 1001 -S nginx-user && \
-    adduser -S -u 1001 -G nginx-user nginx-user && \
-    chown -R nginx-user:nginx-user /usr/share/nginx/html && \
-    chown -R nginx-user:nginx-user /var/cache/nginx && \
-    chown -R nginx-user:nginx-user /var/log/nginx && \
-    chown -R nginx-user:nginx-user /etc/nginx/conf.d && \
-    touch /var/run/nginx.pid && \
-    chown -R nginx-user:nginx-user /var/run/nginx.pid
+# Create nginx user and set permissions
+RUN addgroup -g 101 -S nginx || true
+RUN adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx || true
 
-# Add security headers script
-COPY security-headers.sh /docker-entrypoint.d/40-security-headers.sh
-RUN chmod +x /docker-entrypoint.d/40-security-headers.sh
+# Set proper permissions
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chown -R nginx:nginx /var/cache/nginx && \
+    chown -R nginx:nginx /etc/nginx && \
+    mkdir -p /var/log/nginx && \
+    chown -R nginx:nginx /var/log/nginx
+
+# Create health check endpoint
+RUN echo '<!DOCTYPE html><html><body><h1>OK</h1></body></html>' > /usr/share/nginx/html/health
+
+# Expose ports
+EXPOSE 80 443
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/ || exit 1
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:80/health || exit 1
 
 # Switch to non-root user
-USER nginx-user
-
-# Expose port
-EXPOSE 80
+USER nginx
 
 # Start nginx
 CMD ["nginx", "-g", "daemon off;"]
+
+# Stage 6: Production with SSL support
+FROM production as production-ssl
+
+USER root
+
+# Install certbot for SSL certificates
+RUN apk add --no-cache certbot certbot-nginx
+
+# Copy SSL configuration
+COPY nginx/ssl/ /etc/nginx/ssl/
+
+# Copy SSL nginx configuration
+COPY nginx/ssl-conf.d/ /etc/nginx/conf.d/
+
+# Create SSL certificate directory
+RUN mkdir -p /etc/letsencrypt/live && \
+    chown -R nginx:nginx /etc/letsencrypt
+
+# Switch back to nginx user
+USER nginx
+
+# Enhanced health check with SSL
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:80/health && (curl -f -k https://localhost:443/health || true) || exit 1
+
+# Start nginx with SSL support
+CMD ["nginx", "-g", "daemon off;"]
+
+# Stage 7: Testing environment
+FROM builder as testing
+
+# Install additional testing dependencies
+RUN npm install --save-dev \
+    @testing-library/react \
+    @testing-library/jest-dom \
+    @testing-library/user-event \
+    @vitest/ui \
+    jsdom
+
+# Copy test files
+COPY tests/ tests/
+
+# Run tests by default
+CMD ["npm", "run", "test"]
+
+# Stage 8: Production with monitoring
+FROM production as production-monitoring
+
+USER root
+
+# Install monitoring tools
+RUN apk add --no-cache \
+    curl \
+    jq \
+    htop \
+    prometheus-node-exporter
+
+# Copy monitoring configuration
+COPY monitoring/ /etc/monitoring/
+
+# Create monitoring script
+RUN echo '#!/bin/sh\n\
+while true; do\n\
+    curl -s http://localhost:80/health > /dev/null || echo "Health check failed at $(date)"\n\
+    sleep 30\n\
+done' > /usr/local/bin/monitor.sh && \
+    chmod +x /usr/local/bin/monitor.sh
+
+# Switch back to nginx user
+USER nginx
+
+# Enhanced health check with monitoring
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:80/health || exit 1
+
+# Start nginx with background monitoring
+CMD sh -c '/usr/local/bin/monitor.sh &' && nginx -g 'daemon off;'

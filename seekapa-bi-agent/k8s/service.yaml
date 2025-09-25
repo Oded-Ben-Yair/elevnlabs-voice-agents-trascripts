@@ -1,0 +1,153 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-backend-service
+  namespace: seekapa
+  labels:
+    app: seekapa-backend
+    tier: api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: seekapa-backend
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-frontend-service
+  namespace: seekapa
+  labels:
+    app: seekapa-frontend
+    tier: frontend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  selector:
+    app: seekapa-frontend
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-postgres-service
+  namespace: seekapa
+  labels:
+    app: seekapa-postgres
+    tier: database
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+    name: postgres
+  selector:
+    app: seekapa-postgres
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-redis-service
+  namespace: seekapa
+  labels:
+    app: seekapa-redis
+    tier: cache
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+    protocol: TCP
+    name: redis
+  selector:
+    app: seekapa-redis
+
+---
+# Headless service for PostgreSQL StatefulSet (if needed)
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-postgres-headless
+  namespace: seekapa
+  labels:
+    app: seekapa-postgres
+    tier: database
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+    name: postgres
+  selector:
+    app: seekapa-postgres
+
+---
+# External LoadBalancer service for production (optional)
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-backend-external
+  namespace: seekapa
+  labels:
+    app: seekapa-backend
+    tier: api
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+    service.beta.kubernetes.io/azure-dns-label-name: seekapa-api
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 8000
+    protocol: TCP
+    name: https
+  selector:
+    app: seekapa-backend
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seekapa-frontend-external
+  namespace: seekapa
+  labels:
+    app: seekapa-frontend
+    tier: frontend
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+    service.beta.kubernetes.io/azure-dns-label-name: seekapa-app
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 80
+    protocol: TCP
+    name: https
+  selector:
+    app: seekapa-frontend
+  sessionAffinity: ClientIP

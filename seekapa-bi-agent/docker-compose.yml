@@ -1,46 +1,131 @@
 version: '3.8'
 
 services:
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: seekapa-backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql://seekapa_admin:S33kpDB2025@postgres:5432/seekapa_bi
+      - REDIS_URL=redis://redis:6379
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_AI_SERVICES_ENDPOINT=${AZURE_AI_SERVICES_ENDPOINT}
+      - GPT5_DEPLOYMENT=${GPT5_DEPLOYMENT}
+      - POWERBI_TENANT_ID=${POWERBI_TENANT_ID}
+      - POWERBI_CLIENT_ID=${POWERBI_CLIENT_ID}
+      - POWERBI_CLIENT_SECRET=${POWERBI_CLIENT_SECRET}
+      - POWERBI_WORKSPACE_ID=${POWERBI_WORKSPACE_ID}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - RABBITMQ_URL=amqp://seekapa:seekapa_password@rabbitmq:5672/seekapa
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://frontend:3000
+      - MAX_WORKERS=${MAX_WORKERS:-4}
+      - WORKER_TIMEOUT=${WORKER_TIMEOUT:-30}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - seekapa-network
+    volumes:
+      - ./logs:/app/logs
+
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    container_name: seekapa-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://backend:8000
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
+      - NEXT_PUBLIC_SSE_URL=http://localhost:8000/sse
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - seekapa-network
+
   # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: seekapa-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: seekapa_bi
-      POSTGRES_USER: seekapa
-      POSTGRES_PASSWORD: seekapa_password
-      POSTGRES_MULTIPLE_DATABASES: seekapa_bi,seekapa_events,seekapa_read_models
+      - POSTGRES_USER=seekapa_admin
+      - POSTGRES_PASSWORD=S33kpDB2025
+      - POSTGRES_DB=seekapa_bi
+      - POSTGRES_MULTIPLE_DATABASES=seekapa_bi,seekapa_events,seekapa_read_models
+      - PGDATA=/var/lib/postgresql/data/pgdata
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/db/init:/docker-entrypoint-initdb.d
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seekapa_admin -d seekapa_bi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - seekapa-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U seekapa -d seekapa_bi"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
-  # Redis for Caching and Session Storage
+  # Redis Cache Service
   redis:
     image: redis:7-alpine
     container_name: seekapa-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123} --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    networks:
-      - seekapa-network
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 5
+      start_period: 30s
+    networks:
+      - seekapa-network
 
   # Apache Zookeeper (Required for Kafka)
   zookeeper:
@@ -176,13 +261,40 @@ services:
       timeout: 10s
       retries: 5
 
-  # Prometheus for Monitoring
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: seekapa-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - seekapa-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring - Prometheus
   prometheus:
     image: prom/prometheus:latest
     container_name: seekapa-prometheus
+    restart: unless-stopped
     ports:
       - "9090:9090"
     volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
       - prometheus_data:/prometheus
@@ -196,118 +308,27 @@ services:
       - '--web.enable-admin-api'
     networks:
       - seekapa-network
-    restart: unless-stopped
 
-  # Grafana for Dashboards
+  # Monitoring - Grafana
   grafana:
     image: grafana/grafana:latest
     container_name: seekapa-grafana
-    depends_on:
-      - prometheus
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: false
-      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    restart: unless-stopped
     ports:
       - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
-    networks:
-      - seekapa-network
-    restart: unless-stopped
-
-  # Backend Application
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: ${BUILD_TARGET:-production}
-    container_name: seekapa-backend
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql://seekapa:seekapa_password@postgres:5432/seekapa_bi
-      - REDIS_URL=redis://redis:6379/0
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - RABBITMQ_URL=amqp://seekapa:seekapa_password@rabbitmq:5672/seekapa
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
-      - ENVIRONMENT=${ENVIRONMENT:-development}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://frontend:3000
-      - MAX_WORKERS=${MAX_WORKERS:-4}
-      - WORKER_TIMEOUT=${WORKER_TIMEOUT:-30}
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend/app:/app:ro
-      - ./backend/logs:/app/logs
+      - prometheus
     networks:
       - seekapa-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # Frontend Application
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      target: ${BUILD_TARGET:-production}
-    container_name: seekapa-frontend
-    depends_on:
-      - backend
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
-      - NEXT_PUBLIC_SSE_URL=http://localhost:8000/sse
-      - NODE_ENV=${NODE_ENV:-production}
-    ports:
-      - "3000:3000"
-    networks:
-      - seekapa-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # Nginx Reverse Proxy and Load Balancer
-  nginx:
-    image: nginx:alpine
-    container_name: seekapa-nginx
-    depends_on:
-      - backend
-      - frontend
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - nginx_logs:/var/log/nginx
-    networks:
-      - seekapa-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "nginx", "-t"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # Data Pipeline Worker (for heavy processing)
   pipeline-worker:
@@ -325,7 +346,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://seekapa:seekapa_password@postgres:5432/seekapa_bi
+      - DATABASE_URL=postgresql://seekapa_admin:S33kpDB2025@postgres:5432/seekapa_bi
       - REDIS_URL=redis://redis:6379/0
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - RABBITMQ_URL=amqp://seekapa:seekapa_password@rabbitmq:5672/seekapa
@@ -362,7 +383,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://seekapa:seekapa_password@postgres:5432/seekapa_events
+      - DATABASE_URL=postgresql://seekapa_admin:S33kpDB2025@postgres:5432/seekapa_events
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - RABBITMQ_URL=amqp://seekapa:seekapa_password@rabbitmq:5672/seekapa
       - WORKER_TYPE=event_sourcing
@@ -384,6 +405,7 @@ networks:
   seekapa-network:
     driver: bridge
     ipam:
+      driver: default
       config:
         - subnet: 172.20.0.0/16
 
