@@ -105,3 +105,4 @@ If any step fails the script logs an error message and moves on to the next file
 
 - Extend the pipeline with batching, retries, or resumable downloads if you process large volumes.
 - Customize the Word report (branding, formatting) by editing `TranscriptWriter` in `src/pipeline.py`.
+# bonanza
